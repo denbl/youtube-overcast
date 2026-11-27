@@ -27,6 +27,10 @@ class FakeBucket:
 fake = FakeBucket()
 sync.bucket = lambda: fake
 sync.DRY_RUN = False
+# Pin the storage settings, so the result does not depend on whose config.json
+# happens to sit next to sync.py.
+sync.REPO, sync.TAG = "someone/podcast", "audio"
+sync.PUBLIC_BASE, sync.S3_PREFIX = "", ""
 gh = []
 sync.run = lambda cmd, **kw: (gh.append(cmd), "")[1]
 
@@ -47,6 +51,12 @@ gh.clear(); fake.puts.clear(); tmpf.write_bytes(b"audio")
 sync.upload(tmpf)
 check("uploads through gh", gh[0][:3], ["gh", "release", "upload"])
 check("nothing went to the bucket", fake.puts, [])
+sync.REPO = ""
+try:
+    sync.upload(tmpf); check("an empty github_repo is caught", "no raise", "AuthExpired")
+except sync.AuthExpired as e:
+    check("an empty github_repo is caught", "github_repo" in str(e), True)
+sync.REPO = "someone/podcast"
 
 print("storage = s3")
 sync.STORAGE, sync.PUBLIC_BASE, sync.S3_PREFIX = "s3", "https://pub-deadbeef.r2.dev", "feed/"
