@@ -101,6 +101,9 @@ def log(msg):
 
 
 def run(cmd, **kw):
+    # Nothing here may ever wait for typing: a sync runs unattended, and a tool
+    # like gh will happily sit on a prompt forever if it is given a terminal.
+    kw.setdefault("stdin", subprocess.DEVNULL)
     return subprocess.run(cmd, check=True, text=True, capture_output=True, **kw).stdout
 
 
@@ -608,6 +611,8 @@ def check():
         test("bucket reachable", lambda: f"{len(bucket().list())} objects")
         test("feed served publicly", lambda: http_head(FEED_URL),
              "run: python3 sync.py --rebuild")
+    test("cover art uploaded", lambda: http_head(asset_url(COVER)),
+         "run: python3 sync.py --rebuild")
     test("age-gate sign-in", lambda: "Chrome profile ready" if CHROME_PROFILE
          and under(CHROME_PROFILE).exists() else fail("no Chrome profile, age-restricted videos will fail"),
          'open -na "Google Chrome" --args '
@@ -663,6 +668,16 @@ def mask(value):
         name, _, domain = value.partition("@")
         return f"{name[:1]}***@{domain}"
     return f"{value[:6]}...{value[-4:]}" if len(value) > 14 else value
+
+
+def stored(name):
+    """Is this file already in the feed's storage? Never raises, so a run that
+    cannot tell simply does not re-upload."""
+    try:
+        http_head(asset_url(name))
+        return True
+    except Exception:
+        return False
 
 
 def http_head(url):
@@ -751,7 +766,7 @@ def main():
                 log(f"FAILED {vid}: {(e.stderr or '').strip()[-500:]}")
                 failures.append(vid)
 
-    if REBUILD:
+    if REBUILD or (changed and not stored(COVER)):
         upload_copy(HERE / COVER)
     if changed or REBUILD:
         STATE_FILE.write_text(json.dumps(episodes, ensure_ascii=False, indent=1))

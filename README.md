@@ -41,7 +41,17 @@ a server.
 
 - A Mac. Scheduling uses launchd, secrets live in the Keychain, notifications
   go through `osascript`.
-- Homebrew, for `ffmpeg` and `deno`.
+- Python 3.11 or newer, because yt-dlp needs it. macOS ships 3.9, so this
+  usually means `brew install python@3.13`. The script itself runs on the
+  system Python; only its virtualenv needs the new one.
+- `ffmpeg` and `deno`:
+
+  ```bash
+  brew install ffmpeg deno
+  ```
+
+  Add `gh` to that line if you are going to keep the files in a GitHub release
+  rather than a bucket, and run `gh auth login`.
 - A YouTube playlist, Public or Unlisted, so the script can read it without
   signing in.
 - Somewhere to put the files. A Cloudflare R2 bucket is free at this volume and
@@ -64,6 +74,10 @@ python3 setup.py
 creates the virtualenv, installs yt-dlp with its JS challenge solver, writes
 `config.json`, puts your passwords in the Keychain without printing them,
 installs the launchd agent, and checks the result.
+
+Loading the agent starts the first sync straight away. Downloading and
+re-encoding a few hours of audio takes a few minutes, so the feed will be empty
+for a little while. Watch `state/sync.log` if you want to see it happen.
 
 Run it again whenever you like. Steps that are already done are skipped.
 

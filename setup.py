@@ -205,8 +205,12 @@ def main():
 def finish():
     step(9, "Checking everything")
     code = subprocess.run([sys.executable, "-I", str(HERE / "sync.py"), "--check"]).returncode
-    say("\nReady, the feed URL is above." if code == 0
-        else "\nFix what is listed above, then run this again.")
+    if code == 0:
+        say("\nReady. The first sync has already started in the background.")
+        say("It downloads and re-encodes every video in the playlist, so give it a")
+        say("few minutes before the feed fills up. Watch it in state/sync.log")
+    else:
+        say("\nFix what is listed above, then run this again.")
     return code
 
 
