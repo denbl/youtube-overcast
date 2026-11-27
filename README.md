@@ -192,6 +192,29 @@ python3 sync.py --migrate       # copy a GitHub release into a bucket
 launchctl kickstart gui/$(id -u)/yt-overcast   # run the agent now
 ```
 
+## Tests
+
+```bash
+python3 tests/run.py
+```
+
+57 checks over the parts that are easy to get wrong: reading Overcast's export,
+deciding what counts as listened, the cookie fallback, which storage a file
+goes to, and the migration. None of them reach the network or a live account.
+
+`tests/test_sigv4.py` compares the hand-written AWS signature against botocore
+on seven kinds of request. It skips itself unless botocore is there:
+
+```bash
+.venv/bin/pip install botocore && .venv/bin/python tests/run.py
+```
+
+`tests/drive_setup.py` is kept out of that run because it is slow. It drives
+`setup.py` start to finish on a throwaway copy, answering it the way a person
+would, and that is the test that caught the installer building its virtualenv
+with a Python too old for yt-dlp. It uses a temporary directory and its own
+HOME, and unloads the launchd agent it installs.
+
 ## Settings
 
 `config.json`, written for you by `setup.py`:
@@ -215,6 +238,7 @@ the login Keychain, the YouTube token in `state/`, and none of it is committed.
 - `s3store.py` – a small S3 client, standard library only.
 - `dump_cookies.py` – asks Chrome for its cookies.
 - `setup.py` – the guided install.
+- `tests/` – the test suite, see above.
 - `state/` – credentials, episode list, log. Not committed.
 
 ## About the files being public

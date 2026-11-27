@@ -46,7 +46,7 @@ LOCAL_DIR = HERE / "out"  # used only with --dry-run
 PLAYLIST = CONFIG["playlist_url"]
 REPO = CONFIG.get("github_repo", "")  # "owner/name", only used when storage is "github"
 TAG = CONFIG.get("release_tag", "audio")
-FEED_TITLE = CONFIG.get("feed_title", "YouTube на пробежку")
+FEED_TITLE = CONFIG.get("feed_title", "My Feed")
 COVER = "cover.jpg"  # uploaded once with: python3 sync.py --rebuild
 
 # Age-restricted videos need a signed-in session. Chrome 158 encrypts its cookie
@@ -256,7 +256,7 @@ def yt_auth():
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write("<h2>Готово. Можно закрыть окно.</h2>".encode())
+            self.wfile.write("<h2>Done. You can close this window.</h2>".encode())
 
         def log_message(self, *args):
             pass
@@ -267,7 +267,7 @@ def yt_auth():
         url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(
             {"client_id": client_id, "redirect_uri": redirect_uri, "response_type": "code",
              "scope": YT_SCOPE, "access_type": "offline", "prompt": "consent"})
-        print("Открой ссылку и разреши доступ к плейлистам:\n\n" + url + "\n")
+        print("Open this and allow access to your playlists:\n\n" + url + "\n")
         webbrowser.open(url)
         deadline = time.time() + 300
         while not got and time.time() < deadline:
@@ -372,7 +372,7 @@ def clean_playlist():
         cleaned.add(vid)  # remember it even if it had already left the playlist
         CLEANED_FILE.write_text(json.dumps(sorted(cleaned), indent=1))
     if removed:
-        notify(f"Прослушано, убрал из плейлиста: {len(removed)}")
+        notify(f"Listened, so removed from the playlist: {len(removed)}")
     return removed
 
 
@@ -425,7 +425,7 @@ def fetch_with_cookies(vid, workdir):
             return fetch_episode(vid, workdir, cookies)
         except subprocess.CalledProcessError as again:
             if AGE_GATE in (again.stderr or ""):
-                notify("Вход в YouTube истёк. Перелогинься в профиле state/chrome-profile.")
+                notify("YouTube sign-in expired. Sign in again in state/chrome-profile.")
             raise
 
 
@@ -714,7 +714,7 @@ def main():
         removed = clean_playlist()
     except AuthExpired as e:
         log(f"playlist cleanup failed: {e}")
-        notify("Очистка плейлиста не работает. Лог: yt-overcast/state/sync.log")
+        notify("Playlist cleanup is failing. See state/sync.log")
     except Exception as e:  # noqa: BLE001 - the feed matters more than the cleanup
         log(f"playlist cleanup crashed: {type(e).__name__}: {e}")
 
@@ -752,7 +752,7 @@ def main():
         log("feed updated")
 
     if failures:
-        notify(f"Не удалось скачать {len(failures)} видео. Лог: yt-overcast/state/sync.log")
+        notify(f"Could not download {len(failures)} video(s). See state/sync.log")
         return 1
     return 0
 
@@ -762,9 +762,9 @@ if __name__ == "__main__":
         sys.exit(main())
     except AuthExpired as e:
         log(f"FAILED: {e}")
-        notify("Нужно обновить доступы. Лог: yt-overcast/state/sync.log")
+        notify("Credentials need renewing. See state/sync.log")
         sys.exit(1)
     except subprocess.CalledProcessError as e:
         log(f"FAILED: {' '.join(e.cmd[:3])}: {(e.stderr or '').strip()[-500:]}")
-        notify("Синхронизация плейлиста упала. Лог: yt-overcast/state/sync.log")
+        notify("The sync crashed. See state/sync.log")
         sys.exit(1)
