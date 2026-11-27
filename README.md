@@ -77,7 +77,7 @@ buttons to press:
 2. Creating the bucket in your storage provider's dashboard, and the API token
    that goes with it.
 
-## Checking it
+## Checking the setup
 
 ```bash
 python3 sync.py --check
@@ -130,7 +130,7 @@ By default the audio and `feed.xml` go into a GitHub release, which needs
 nothing but an authenticated `gh`. The catch is that release assets of a public
 repo are public, and the repo shows up on your profile.
 
-The alternative is any S3-compatible bucket. Cloudflare R2 is the one I use:
+The alternative is any S3-compatible bucket. Cloudflare R2 fits this well:
 10 GB free, no charge for traffic out, and a public address of the form
 `https://pub-<random>.r2.dev` that nobody can guess or stumble onto. Backblaze
 B2 and AWS S3 speak the same protocol and work with the same code. Enabling R2
@@ -146,8 +146,8 @@ checked against botocore's output on seven kinds of request.
 
 ## Age-restricted videos
 
-These need a signed-in YouTube session, and on macOS that is the fiddliest part
-of the project.
+These need a signed-in YouTube session. Getting one on macOS takes more work
+than it sounds, for one specific reason.
 
 Chrome 158 encrypts its cookie store with a scheme it labels `v11`, and yt-dlp
 only decrypts that on Linux. On macOS every value comes back as ciphertext, so
