@@ -1,4 +1,4 @@
-# yt-overcast
+# youtube-overcast
 
 Turn a YouTube playlist into a private podcast feed, and let your podcast app
 empty that playlist as you listen.
@@ -56,7 +56,7 @@ Downloading age-restricted videos needs a signed-in YouTube session.
 ## Setup
 
 ```bash
-git clone https://github.com/denbl/yt-overcast && cd yt-overcast
+git clone https://github.com/denbl/youtube-overcast && cd youtube-overcast
 python3 setup.py
 ```
 
@@ -189,7 +189,7 @@ python3 sync.py --dry-run       # build into ./out, report planned deletions, to
 python3 sync.py --rebuild       # re-upload the cover and feed.xml
 python3 sync.py --auth-youtube  # grant permission to edit the playlist, once
 python3 sync.py --migrate       # copy a GitHub release into a bucket
-launchctl kickstart gui/$(id -u)/yt-overcast   # run the agent now
+launchctl kickstart gui/$(id -u)/youtube-overcast   # run the agent now
 ```
 
 ## Tests

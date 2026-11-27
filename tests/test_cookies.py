@@ -3,7 +3,7 @@ import atexit, shutil, subprocess, sys, tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRATCH = Path(tempfile.mkdtemp(prefix="yt-overcast-tests-"))
+SCRATCH = Path(tempfile.mkdtemp(prefix="youtube-overcast-tests-"))
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 sys.path.insert(0, str(ROOT))
 import sync

@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FILES = ["sync.py", "s3store.py", "dump_cookies.py", "setup.py",
-         "config.json.example", "yt-overcast.plist.example", "cover.jpg"]
+         "config.json.example", "youtube-overcast.plist.example", "cover.jpg"]
 ANSWERS = [
     "https://www.youtube.com/playlist?list=PLAFRuxECUmqI",  # a real playlist id
     "Test Feed",
@@ -60,13 +60,13 @@ def drive(workdir, home):
 
 
 def main():
-    scratch = Path(tempfile.mkdtemp(prefix="yt-overcast-setup-"))
+    scratch = Path(tempfile.mkdtemp(prefix="youtube-overcast-setup-"))
     workdir, home = scratch / "copy", scratch / "home"
     workdir.mkdir()
     (home / "Library" / "LaunchAgents").mkdir(parents=True)
     for name in FILES:
         shutil.copy(ROOT / name, workdir / name)
-    plist = home / "Library" / "LaunchAgents" / "yt-overcast.plist"
+    plist = home / "Library" / "LaunchAgents" / "youtube-overcast.plist"
     try:
         transcript, sent, code = drive(workdir, home)
         print(transcript)

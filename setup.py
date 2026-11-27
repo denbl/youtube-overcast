@@ -20,7 +20,7 @@ EXAMPLE = HERE / "config.json.example"
 VENV = HERE / ".venv"
 STATE = HERE / "state"
 AGENTS = Path.home() / "Library" / "LaunchAgents"
-PLIST = AGENTS / "yt-overcast.plist"
+PLIST = AGENTS / "youtube-overcast.plist"
 
 
 def say(text=""):
@@ -74,7 +74,7 @@ def run(cmd, **kw):
 def main():
     if not sys.stdin.isatty():
         sys.exit("Run this in a terminal: python3 setup.py")
-    say("Setting up yt-overcast in " + str(HERE))
+    say("Setting up youtube-overcast in " + str(HERE))
     STATE.mkdir(exist_ok=True)
 
     step(1, "Command line tools")
@@ -194,7 +194,7 @@ def main():
     if already:
         say(f"   {already[0].name} already runs this copy, leaving it alone")
         return finish()
-    PLIST.write_text((HERE / "yt-overcast.plist.example").read_text().replace("__DIR__", str(HERE)))
+    PLIST.write_text((HERE / "youtube-overcast.plist.example").read_text().replace("__DIR__", str(HERE)))
     subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(PLIST)], capture_output=True)
     run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)])
     say(f"   Installed and loaded {PLIST}")

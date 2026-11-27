@@ -2,7 +2,7 @@ import atexit, json, shutil, sys, tempfile, urllib.parse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRATCH = Path(tempfile.mkdtemp(prefix="yt-overcast-tests-"))
+SCRATCH = Path(tempfile.mkdtemp(prefix="youtube-overcast-tests-"))
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 sys.path.insert(0, str(ROOT))
 import sync
@@ -19,7 +19,7 @@ def check(name, got, want):
     else:
         fail += 1; print(f"  FAIL {name}\n       got  {got!r}\n       want {want!r}")
 
-OURS = "https://github.com/denbl/yt-overcast-feed/releases/download/audio"
+OURS = f"https://github.com/{sync.REPO}/releases/download/{sync.TAG}"  # whatever config says
 
 def opml(xml_url, eps, base=OURS):
     rows = "".join(

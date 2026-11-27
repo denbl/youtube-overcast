@@ -34,7 +34,13 @@ from socketserver import TCPServer
 from xml.sax.saxutils import escape
 
 HERE = Path(__file__).resolve().parent
-CONFIG = json.loads((HERE / "config.json").read_text())
+# A fresh clone has no config.json yet. Falling back to the example keeps
+# --check runnable, and --check is what says the values are still the example.
+CONFIG_FILE = HERE / "config.json"
+CONFIG_IS_EXAMPLE = not CONFIG_FILE.exists()
+if CONFIG_IS_EXAMPLE:
+    CONFIG_FILE = HERE / "config.json.example"
+CONFIG = json.loads(CONFIG_FILE.read_text())
 STATE_DIR = HERE / "state"
 STATE_FILE = STATE_DIR / "episodes.json"
 CLEANED_FILE = STATE_DIR / "cleaned.json"  # videos already dropped from the playlist
@@ -76,7 +82,7 @@ PUBLIC_BASE = CONFIG.get("public_base_url", "").rstrip("/")
 CONTENT_TYPES = {".m4a": "audio/mp4", ".xml": "application/rss+xml",
                  ".jpg": "image/jpeg", ".png": "image/png", ".svg": "image/svg+xml"}
 YT_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
-UA = "yt-overcast-feed/1.0"
+UA = "youtube-overcast/1.0"
 
 DRY_RUN = "--dry-run" in sys.argv
 REBUILD = "--rebuild" in sys.argv  # re-upload cover.jpg and feed.xml even if nothing changed
@@ -573,6 +579,9 @@ def check():
         test("gh", lambda: tool("gh", "auth", "status"), "brew install gh && gh auth login")
 
     section[0] = "Config"
+    test("config.json", lambda: fail("missing, running on config.json.example")
+         if CONFIG_IS_EXAMPLE else "yours",
+         "cp config.json.example config.json, then edit it (or run setup.py)")
     test("playlist", lambda: real(playlist_id(), "playlist_url"),
          'put your own playlist URL in "playlist_url"')
     test("storage", lambda: STORAGE if STORAGE in ("github", "s3")
@@ -609,8 +618,8 @@ def check():
     test("state directory", lambda: "writable" if os.access(STATE_DIR, os.W_OK)
          else fail("not writable"))
     test("scheduled agent", agent_status,
-         'sed "s|__DIR__|$PWD|g" yt-overcast.plist.example > ~/Library/LaunchAgents/yt-overcast.plist'
-         " && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/yt-overcast.plist",
+         'sed "s|__DIR__|$PWD|g" youtube-overcast.plist.example > ~/Library/LaunchAgents/youtube-overcast.plist'
+         " && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/youtube-overcast.plist",
          optional=True)
 
     shown = ""
