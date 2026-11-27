@@ -1,0 +1,534 @@
+#!/usr/bin/python3
+"""Mirror a YouTube playlist into an audio-only podcast feed for Overcast.
+
+Every run:
+  1. Ask Overcast which episodes are finished (played, or deleted by hand) and
+     drop those videos from the YouTube playlist, so the playlist holds only
+     what is still unheard.
+  2. Read the playlist (it must be "unlisted" or public, so no login is needed).
+  3. For each new video: download the audio, re-encode to mono AAC 64 kbps,
+     upload it as an asset of a GitHub release.
+  4. For each video removed from the playlist: delete its asset.
+  5. Rebuild feed.xml and upload it to the same release.
+
+Settings live in config.json next to this file. State lives in state/.
+Run with --dry-run to build files locally and only report planned deletions.
+Run with --auth-youtube once to grant write access to the playlist.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
+import xml.etree.ElementTree as ET
+from email.utils import formatdate
+from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+from socketserver import TCPServer
+from xml.sax.saxutils import escape
+
+HERE = Path(__file__).resolve().parent
+CONFIG = json.loads((HERE / "config.json").read_text())
+STATE_DIR = HERE / "state"
+STATE_FILE = STATE_DIR / "episodes.json"
+CLEANED_FILE = STATE_DIR / "cleaned.json"  # videos already dropped from the playlist
+COOKIE_FILE = STATE_DIR / "overcast_cookie.txt"
+YT_CLIENT_FILE = STATE_DIR / "youtube_client.json"  # OAuth client from Google Cloud
+YT_TOKEN_FILE = STATE_DIR / "youtube_token.json"  # refresh token, written by --auth-youtube
+LOCAL_DIR = HERE / "out"  # used only with --dry-run
+
+PLAYLIST = CONFIG["playlist_url"]
+REPO = CONFIG["github_repo"]  # "owner/name"
+TAG = CONFIG.get("release_tag", "audio")
+FEED_TITLE = CONFIG.get("feed_title", "YouTube на пробежку")
+COVER = "cover.jpg"  # uploaded once with: python3 sync.py --rebuild
+
+# Age-restricted videos need a signed-in session. Chrome 158 encrypts its cookie
+# store with a scheme yt-dlp cannot read on macOS, so the cookies are asked for
+# from Chrome itself (dump_cookies.py) out of a profile kept just for this.
+CHROME_PROFILE = CONFIG.get("chrome_profile", "")
+COOKIES_FILE = CONFIG.get("cookies_file", "")
+DUMPER = HERE / "dump_cookies.py"
+AGE_GATE = "confirm your age"
+
+# yt-dlp needs the yt-dlp-ejs solver for YouTube's JS challenge; the Homebrew
+# build ships one that crashes on current deno. .venv holds a working pair.
+VENV_YT_DLP = HERE / ".venv" / "bin" / "yt-dlp"
+YT_DLP = str(VENV_YT_DLP) if VENV_YT_DLP.exists() else "yt-dlp"
+
+KEYCHAIN_SERVICE = "yt-overcast-overcast"  # holds the Overcast e-mail and password
+YT_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
+UA = "yt-overcast-feed/1.0"
+
+DRY_RUN = "--dry-run" in sys.argv
+REBUILD = "--rebuild" in sys.argv  # re-upload cover.jpg and feed.xml even if nothing changed
+AUTH_YOUTUBE = "--auth-youtube" in sys.argv
+os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")
+
+
+class AuthExpired(Exception):
+    """Overcast or YouTube needs the credentials to be set up again."""
+
+
+def log(msg):
+    print(time.strftime("%Y-%m-%d %H:%M:%S"), msg, flush=True)
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, check=True, text=True, capture_output=True, **kw).stdout
+
+
+def notify(msg):
+    subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "YouTube → Overcast"'])
+
+
+def asset_url(name):
+    return f"https://github.com/{REPO}/releases/download/{TAG}/{name}"
+
+
+FEED_URL = asset_url("feed.xml")
+
+
+def fetch(url, data=None, headers=None, method=None, follow=True):
+    """One HTTP request. Returns (status, headers, body); never raises on status."""
+    body = urllib.parse.urlencode(data).encode() if isinstance(data, dict) else data
+    req = urllib.request.Request(url, data=body, method=method,
+                                 headers={"User-Agent": UA, **(headers or {})})
+    handlers = [] if follow else [NoRedirect()]
+    opener = urllib.request.build_opener(*handlers)
+    try:
+        with opener.open(req, timeout=180) as r:
+            return r.status, r.headers, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read()
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+# --- Overcast: which episodes are finished -----------------------------------
+
+def keychain(field):
+    """Read the Overcast e-mail or password from the login keychain."""
+    if field == "password":
+        return run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"]).strip()
+    p = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE],
+                       text=True, capture_output=True)
+    m = re.search(r'"acct"<blob>="([^"]*)"', p.stdout)
+    if not m:
+        raise AuthExpired(f"no keychain item for service {KEYCHAIN_SERVICE}")
+    return m.group(1)
+
+
+def overcast_login():
+    status, headers, _ = fetch("https://overcast.fm/login?then=account",
+                               data={"email": keychain("account"), "password": keychain("password")},
+                               follow=False)
+    for header in headers.get_all("Set-Cookie") or []:
+        m = re.match(r"\s*o=([^;]+)", header)
+        if m:
+            COOKIE_FILE.write_text(m.group(1))
+            COOKIE_FILE.chmod(0o600)
+            return m.group(1)
+    raise AuthExpired(f"Overcast rejected the login (HTTP {status})")
+
+
+def overcast_opml():
+    """Fetch the extended OPML export. Overcast allows roughly 10 per day."""
+    cookie = COOKIE_FILE.read_text().strip() if COOKIE_FILE.exists() else ""
+    for attempt in (1, 2):
+        if not cookie:
+            cookie = overcast_login()
+        status, _, body = fetch("https://overcast.fm/account/export_opml/extended",
+                                headers={"Cookie": f"o={cookie}"}, follow=False)
+        if status == 200 and body.lstrip().startswith(b"<?xml"):
+            return body
+        if status == 429:
+            raise AuthExpired("Overcast rate-limited the OPML export (HTTP 429)")
+        if attempt == 1:
+            cookie = ""  # session died, or we were handed the login page
+            continue
+        raise AuthExpired(f"Overcast OPML export failed (HTTP {status})")
+
+
+def overcast_finished():
+    """Return {video_id: episode_title} for episodes played or deleted in Overcast."""
+    root = ET.fromstring(overcast_opml())
+    feeds = root.findall(".//outline[@type='rss']")
+    ours = [f for f in feeds if f.get("xmlUrl") == FEED_URL]
+    if not ours:  # Overcast may have stored a slightly different feed URL
+        marker = f"/{REPO}/releases/download/{TAG}/"
+        ours = [f for f in feeds
+                if any(marker in (e.get("enclosureUrl") or "")
+                       for e in f.findall("./outline[@type='podcast-episode']"))]
+    if not ours:
+        raise AuthExpired(f"Overcast has no feed {FEED_URL}")
+    done = {}
+    for feed in ours:
+        for ep in feed.findall("./outline[@type='podcast-episode']"):
+            if ep.get("played") != "1" and ep.get("userDeleted") != "1":
+                continue
+            m = re.search(r"/([A-Za-z0-9_-]{6,})\.m4a", ep.get("enclosureUrl") or "")
+            if m:
+                done[m.group(1)] = ep.get("title") or m.group(1)
+    return done
+
+
+# --- YouTube: drop finished videos from the playlist -------------------------
+
+def playlist_id():
+    ids = urllib.parse.parse_qs(urllib.parse.urlparse(PLAYLIST).query).get("list")
+    if not ids:
+        raise AuthExpired(f"playlist_url has no list= parameter: {PLAYLIST}")
+    return ids[0]
+
+
+def yt_client():
+    data = json.loads(YT_CLIENT_FILE.read_text())
+    c = data.get("installed") or data.get("web") or data
+    return c["client_id"], c["client_secret"]
+
+
+def yt_auth():
+    """One-time consent flow. Saves a refresh token to state/youtube_token.json."""
+    client_id, secret = yt_client()
+    got = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            got.update({k: v[0] for k, v in
+                        urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write("<h2>Готово. Можно закрыть окно.</h2>".encode())
+
+        def log_message(self, *args):
+            pass
+
+    with TCPServer(("127.0.0.1", 0), Handler) as srv:
+        srv.timeout = 5
+        redirect_uri = f"http://127.0.0.1:{srv.server_address[1]}/"
+        url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(
+            {"client_id": client_id, "redirect_uri": redirect_uri, "response_type": "code",
+             "scope": YT_SCOPE, "access_type": "offline", "prompt": "consent"})
+        print("Открой ссылку и разреши доступ к плейлистам:\n\n" + url + "\n")
+        webbrowser.open(url)
+        deadline = time.time() + 300
+        while not got and time.time() < deadline:
+            srv.handle_request()
+    if "code" not in got:
+        raise AuthExpired(f"Google returned no code: {got or 'timed out'}")
+
+    status, _, body = fetch("https://oauth2.googleapis.com/token",
+                            data={"code": got["code"], "client_id": client_id,
+                                  "client_secret": secret, "redirect_uri": redirect_uri,
+                                  "grant_type": "authorization_code"})
+    token = json.loads(body or b"{}")
+    if "refresh_token" not in token:
+        raise AuthExpired(f"no refresh token (HTTP {status}): {token}")
+    STATE_DIR.mkdir(exist_ok=True)
+    YT_TOKEN_FILE.write_text(json.dumps({"refresh_token": token["refresh_token"]}, indent=1))
+    YT_TOKEN_FILE.chmod(0o600)
+    log(f"YouTube access saved to {YT_TOKEN_FILE.name}")
+
+
+def yt_token():
+    client_id, secret = yt_client()
+    refresh = json.loads(YT_TOKEN_FILE.read_text())["refresh_token"]
+    status, _, body = fetch("https://oauth2.googleapis.com/token",
+                            data={"client_id": client_id, "client_secret": secret,
+                                  "refresh_token": refresh, "grant_type": "refresh_token"})
+    token = json.loads(body or b"{}")
+    if "access_token" not in token:
+        raise AuthExpired(f"YouTube refused a token (HTTP {status}): "
+                          f"{token.get('error_description') or token.get('error')}")
+    return token["access_token"]
+
+
+def yt_playlist_items(token):
+    """Return {video_id: playlist_item_id} for the whole playlist."""
+    items, page = {}, None
+    while True:
+        query = {"part": "snippet", "playlistId": playlist_id(), "maxResults": "50"}
+        if page:
+            query["pageToken"] = page
+        status, _, body = fetch(
+            "https://www.googleapis.com/youtube/v3/playlistItems?" + urllib.parse.urlencode(query),
+            headers={"Authorization": f"Bearer {token}"})
+        data = json.loads(body or b"{}")
+        if status != 200:
+            raise AuthExpired(f"YouTube would not list the playlist (HTTP {status}): {data}")
+        for item in data.get("items", []):
+            vid = item["snippet"]["resourceId"].get("videoId")
+            if vid:
+                items[vid] = item["id"]
+        page = data.get("nextPageToken")
+        if not page:
+            return items
+
+
+def yt_delete(token, item_id):
+    status, _, body = fetch(
+        "https://www.googleapis.com/youtube/v3/playlistItems?id=" + urllib.parse.quote(item_id),
+        headers={"Authorization": f"Bearer {token}"}, method="DELETE")
+    if status not in (200, 204, 404):  # 404: already gone, nothing to do
+        raise AuthExpired(f"YouTube would not delete the item (HTTP {status}): {body[:300]!r}")
+
+
+def missing_setup():
+    missing = []
+    if not COOKIE_FILE.exists():
+        try:
+            keychain("account")
+        except (AuthExpired, subprocess.CalledProcessError):
+            missing.append(f"Overcast password in Keychain (service {KEYCHAIN_SERVICE})")
+    if not YT_CLIENT_FILE.exists():
+        missing.append(f"Google Cloud OAuth client at state/{YT_CLIENT_FILE.name}")
+    elif not YT_TOKEN_FILE.exists():
+        missing.append("python3 sync.py --auth-youtube")
+    return missing
+
+
+def clean_playlist():
+    """Drop videos the user has finished in Overcast. Returns the removed ids."""
+    missing = missing_setup()
+    if missing:
+        log("playlist cleanup off, not configured: " + "; ".join(missing))
+        return set()
+
+    cleaned = set(json.loads(CLEANED_FILE.read_text())) if CLEANED_FILE.exists() else set()
+    todo = {v: t for v, t in overcast_finished().items() if v not in cleaned}
+    if not todo:
+        return set()
+    if DRY_RUN:
+        for vid, title in todo.items():
+            log(f"would remove from playlist: {title} ({vid})")
+        return set()
+
+    token = yt_token()
+    items = yt_playlist_items(token)
+    removed = set()
+    for vid, title in todo.items():
+        if vid in items:
+            yt_delete(token, items[vid])
+            log(f"finished in Overcast, removed from playlist: {title}")
+            removed.add(vid)
+        cleaned.add(vid)  # remember it even if it had already left the playlist
+        CLEANED_FILE.write_text(json.dumps(sorted(cleaned), indent=1))
+    if removed:
+        notify(f"Прослушано, убрал из плейлиста: {len(removed)}")
+    return removed
+
+
+# --- the feed ----------------------------------------------------------------
+
+def playlist_ids():
+    out = run([YT_DLP, "--flat-playlist", "-J", PLAYLIST])
+    return [e["id"] for e in json.loads(out)["entries"] if e and e.get("id")]
+
+
+def under(path):
+    """Resolve a config path against the script's own directory."""
+    path = Path(path)
+    return path if path.is_absolute() else HERE / path
+
+
+def refresh_cookies():
+    """Write a fresh cookie file out of Chrome. Returns yt-dlp arguments, or []."""
+    if not (CHROME_PROFILE and COOKIES_FILE):
+        return []
+    profile, target = under(CHROME_PROFILE), under(COOKIES_FILE)
+    if not profile.exists():
+        log(f"no Chrome profile at {profile}, downloading signed out")
+        return []
+    try:
+        log(run([sys.executable, "-I", str(DUMPER), str(profile), str(target)]).strip())
+    except subprocess.CalledProcessError as e:
+        log(f"could not read cookies from Chrome: {(e.stderr or '').strip()[-300:]}")
+        return []
+    return ["--cookies", str(target)] if target.exists() else []
+
+
+def fetch_with_cookies(vid, workdir):
+    """Download a video, signing in only if YouTube asks to confirm age.
+
+    Signing in is a fallback rather than the default: cookies make YouTube
+    demand a solved JS challenge, so they must not be spent on videos that
+    download fine without them.
+    """
+    try:
+        return fetch_episode(vid, workdir)
+    except subprocess.CalledProcessError as e:
+        if AGE_GATE not in (e.stderr or ""):
+            raise
+        cookies = refresh_cookies()
+        if not cookies:
+            raise
+        log(f"age-restricted, retrying signed in: {vid}")
+        try:
+            return fetch_episode(vid, workdir, cookies)
+        except subprocess.CalledProcessError as again:
+            if AGE_GATE in (again.stderr or ""):
+                notify("Вход в YouTube истёк. Перелогинься в профиле state/chrome-profile.")
+            raise
+
+
+def fetch_episode(vid, workdir, cookies=()):
+    url = f"https://www.youtube.com/watch?v={vid}"
+    info = json.loads(run([YT_DLP, "-J", "--no-playlist", *cookies, url]))
+    raw = Path(workdir) / f"{vid}.raw.m4a"
+    final = Path(workdir) / f"{vid}.m4a"
+    run([YT_DLP, "--no-playlist", *cookies,
+         "-f", "bestaudio[ext=m4a]/bestaudio", "-o", str(raw), url])
+    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(raw),
+         "-map", "0:a", "-map_metadata", "0",
+         "-metadata", f"title={info.get('title', vid)}",
+         "-metadata", f"artist={info.get('uploader', '')}",
+         "-c:a", "aac", "-ac", "1", "-b:a", "64k", "-f", "mp4", str(final)])
+    episode = {
+        "id": vid,
+        "title": info.get("title", vid),
+        "channel": info.get("uploader", ""),
+        "description": (info.get("description") or "")[:4000],
+        "duration": int(info.get("duration") or 0),
+        "image": info.get("thumbnail", ""),
+        "link": url,
+        "added": time.time(),
+        "file": final.name,
+        "size": final.stat().st_size,
+    }
+    return episode, final
+
+
+def upload(path):
+    if DRY_RUN:
+        LOCAL_DIR.mkdir(exist_ok=True)
+        Path(path).replace(LOCAL_DIR / Path(path).name)
+        return
+    run(["gh", "release", "upload", TAG, str(path), "--clobber", "--repo", REPO])
+
+
+def upload_copy(path):
+    """Upload a file that must stay in place (upload() moves files in --dry-run)."""
+    tmp = Path(tempfile.gettempdir()) / Path(path).name
+    tmp.write_bytes(Path(path).read_bytes())
+    upload(tmp)
+
+
+def delete_asset(name):
+    if DRY_RUN:
+        (LOCAL_DIR / name).unlink(missing_ok=True)
+        return
+    subprocess.run(["gh", "release", "delete-asset", TAG, name, "--yes", "--repo", REPO],
+                   capture_output=True, text=True)
+
+
+def build_feed(episodes):
+    items = []
+    for ep in sorted(episodes, key=lambda e: e["added"], reverse=True):
+        h, m, s = ep["duration"] // 3600, ep["duration"] % 3600 // 60, ep["duration"] % 60
+        items.append(f"""    <item>
+      <title>{escape(ep['title'])}</title>
+      <itunes:author>{escape(ep['channel'])}</itunes:author>
+      <description>{escape(ep['channel'] + chr(10) + ep['link'] + chr(10) + chr(10) + ep['description'])}</description>
+      <link>{escape(ep['link'])}</link>
+      <guid isPermaLink="false">yt-{ep['id']}</guid>
+      <pubDate>{formatdate(ep['added'])}</pubDate>
+      <enclosure url="{escape(asset_url(ep['file']))}" length="{ep['size']}" type="audio/mp4"/>
+      <itunes:duration>{h:02d}:{m:02d}:{s:02d}</itunes:duration>
+      <itunes:image href="{escape(ep['image'])}"/>
+    </item>""")
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title>{escape(FEED_TITLE)}</title>
+    <link>{escape(PLAYLIST)}</link>
+    <description>Audio from a personal YouTube playlist.</description>
+    <language>ru</language>
+    <itunes:block>Yes</itunes:block>
+    <itunes:image href="{escape(asset_url(COVER))}"/>
+    <image><url>{escape(asset_url(COVER))}</url><title>{escape(FEED_TITLE)}</title><link>{escape(PLAYLIST)}</link></image>
+{chr(10).join(items)}
+  </channel>
+</rss>
+"""
+
+
+def main():
+    STATE_DIR.mkdir(exist_ok=True)
+    if AUTH_YOUTUBE:
+        yt_auth()
+        return 0
+
+    episodes = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else []
+    known = {e["id"] for e in episodes}
+
+    # A failing cleanup must never block the downloads.
+    removed = set()
+    try:
+        removed = clean_playlist()
+    except AuthExpired as e:
+        log(f"playlist cleanup failed: {e}")
+        notify("Очистка плейлиста не работает. Лог: yt-overcast/state/sync.log")
+    except Exception as e:  # noqa: BLE001 - the feed matters more than the cleanup
+        log(f"playlist cleanup crashed: {type(e).__name__}: {e}")
+
+    wanted = [v for v in playlist_ids() if v not in removed]
+    log(f"playlist: {len(wanted)} videos, feed: {len(episodes)} episodes")
+    changed = False
+
+    for ep in [e for e in episodes if e["id"] not in wanted]:
+        log(f"removed from playlist: {ep['title']}")
+        delete_asset(ep["file"])
+        episodes.remove(ep)
+        changed = True
+
+    failures = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for vid in [v for v in wanted if v not in known]:
+            try:
+                ep, path = fetch_with_cookies(vid, tmp)
+                upload(path)
+                episodes.append(ep)
+                STATE_FILE.write_text(json.dumps(episodes, ensure_ascii=False, indent=1))
+                log(f"added: {ep['title']} ({ep['size'] // 1_000_000} MB)")
+                changed = True
+            except subprocess.CalledProcessError as e:
+                log(f"FAILED {vid}: {(e.stderr or '').strip()[-500:]}")
+                failures.append(vid)
+
+    if REBUILD:
+        upload_copy(HERE / COVER)
+    if changed or REBUILD:
+        STATE_FILE.write_text(json.dumps(episodes, ensure_ascii=False, indent=1))
+        feed = Path(tempfile.gettempdir()) / "feed.xml"
+        feed.write_text(build_feed(episodes))
+        upload(feed)
+        log("feed updated")
+
+    if failures:
+        notify(f"Не удалось скачать {len(failures)} видео. Лог: yt-overcast/state/sync.log")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except AuthExpired as e:
+        log(f"FAILED: {e}")
+        notify("Нужно обновить доступы. Лог: yt-overcast/state/sync.log")
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        log(f"FAILED: {' '.join(e.cmd[:3])}: {(e.stderr or '').strip()[-500:]}")
+        notify("Синхронизация плейлиста упала. Лог: yt-overcast/state/sync.log")
+        sys.exit(1)

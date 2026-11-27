@@ -1,0 +1,8 @@
+{
+  "playlist_url": "https://www.youtube.com/playlist?list=PLxxxxxxxxxxxxxxxxxxxx",
+  "github_repo": "yourname/your-feed-repo",
+  "release_tag": "audio",
+  "feed_title": "My Feed",
+  "cookies_file": "state/cookies.txt",
+  "chrome_profile": "state/chrome-profile"
+}
