@@ -1,30 +1,41 @@
 # yt-overcast
 
-A lot of what I want to listen to lives on YouTube: two-hour interviews, talks,
-podcasts that happen to have a video track. A podcast app handles that kind of
-audio better than YouTube does. It has speed control, voice boost, a queue that
-remembers where I stopped and syncs it across devices. The only hard part is
-getting the audio in there.
+Turn a YouTube playlist into a private podcast feed, and let your podcast app
+empty that playlist as you listen.
 
-This script does that. You save a video to a YouTube playlist from the app, one
-tap, the way you already do. Within a few hours it shows up in your podcast
-player as an episode, already downloaded.
+## The problem
 
-The part I actually built it for is what happens next. You listen, you delete
-the episode in the player, and the video disappears from the YouTube playlist
-and its audio file is deleted. Before, that playlist slowly filled with things
-I had already heard, and every couple of weeks I went in and cleaned it out by
-hand. Now it only ever holds what I have not listened to yet, and I open it to
-add things, never to tidy up.
+Long interviews, lectures and podcasts on YouTube are mostly talk. A podcast
+app plays that kind of audio better than YouTube does: speed control, voice
+boost, downloads for offline, and a playback position that follows you across
+devices. Getting the audio out of YouTube and into one is the missing piece.
+
+A second problem shows up later. Whatever list you collect videos in fills up
+with things you have already heard, and every couple of weeks you go in and
+clean it out by hand.
+
+## What this does
+
+It keeps one YouTube playlist and one private podcast feed in sync, both ways.
+
+- Save a video to the playlist from the YouTube app, one tap. Within a few
+  hours it is an episode in your podcast player, already downloaded.
+- Listen to it and delete it in the player. The video leaves the YouTube
+  playlist and its audio file is deleted.
+
+The playlist stays an inbox: it only ever holds what you have not listened to
+yet. Nothing to tidy up.
+
+It is built for listening while walking or running, where you are not looking
+at a screen.
 
 ## What you end up with
 
-A playlist on YouTube that works as your inbox, and a private podcast in your
-player that mirrors it. Save a video, listen, delete. Nothing to maintain.
+A private podcast in your player that mirrors a playlist on YouTube. Audio is
+mono AAC at 64 kbps, roughly 29 MB per hour, which is plenty for talk.
 
-Audio comes out as mono AAC at 64 kbps, roughly 29 MB per hour, which is plenty
-for talk. A Mac has to be on for the sync to run, since it is a launchd agent,
-not a server.
+A Mac has to be on for the sync to run, since this is a launchd agent and not
+a server.
 
 ## What you need before you start
 

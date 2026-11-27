@@ -45,6 +45,28 @@ def have(binary):
     return shutil.which(binary) is not None
 
 
+def recent_python():
+    """Find a Python new enough for yt-dlp. Apple ships 3.9, which is not."""
+    tried = []
+    if sys.version_info >= (3, 11):
+        tried.append(sys.executable)
+    tried += [f"python3.{minor}" for minor in range(15, 10, -1)]
+    tried += ["/opt/homebrew/bin/python3", "/usr/local/bin/python3"]
+    for name in tried:
+        path = name if os.path.isabs(name) else shutil.which(name)
+        if not path:
+            continue
+        try:
+            version = subprocess.run(
+                [path, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+                capture_output=True, text=True, check=True, timeout=20).stdout.strip()
+        except Exception:
+            continue
+        if tuple(int(part) for part in version.split(".")) >= (3, 11):
+            return path, version
+    return None, None
+
+
 def run(cmd, **kw):
     return subprocess.run(cmd, check=True, text=True, **kw)
 
@@ -67,11 +89,25 @@ def main():
     if (VENV / "bin" / "yt-dlp").exists():
         say("   .venv already has yt-dlp")
     else:
-        say("   Creating .venv and installing yt-dlp with yt-dlp-ejs")
-        run([sys.executable, "-m", "venv", str(VENV)])
-        run([str(VENV / "bin" / "pip"), "install", "--quiet", "--upgrade", "pip"])
-        run([str(VENV / "bin" / "pip"), "install", "--quiet", "yt-dlp", "yt-dlp-ejs"])
-        say("   done")
+        python, version = recent_python()
+        if not python:
+            say("   yt-dlp needs Python 3.11 or newer, and none is installed.")
+            say("   Apple's /usr/bin/python3 is 3.9, which is too old.")
+            wait("Run: brew install python@3.13")
+            python, version = recent_python()
+        if not python:
+            say("   Still no Python 3.11+, skipping. Run setup.py again once it is there.")
+        else:
+            say(f"   Creating .venv with Python {version} and installing yt-dlp with yt-dlp-ejs")
+            try:
+                run([python, "-m", "venv", str(VENV)])
+                run([str(VENV / "bin" / "pip"), "install", "--quiet", "--upgrade", "pip"])
+                run([str(VENV / "bin" / "pip"), "install", "--quiet", "yt-dlp", "yt-dlp-ejs"])
+                say("   done")
+            except subprocess.CalledProcessError:
+                shutil.rmtree(VENV, ignore_errors=True)
+                say("   That install failed. Try it by hand to see why:")
+                say(f"     {python} -m venv .venv && .venv/bin/pip install yt-dlp yt-dlp-ejs")
 
     step(3, "config.json")
     settings = json.loads(CONFIG.read_text()) if CONFIG.exists() else json.loads(EXAMPLE.read_text())
