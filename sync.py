@@ -45,6 +45,8 @@ STATE_DIR = HERE / "state"
 STATE_FILE = STATE_DIR / "episodes.json"
 CLEANED_FILE = STATE_DIR / "cleaned.json"  # videos already dropped from the playlist
 COOKIE_FILE = STATE_DIR / "overcast_cookie.txt"
+OPML_NEXT_FILE = STATE_DIR / "overcast_next.txt"  # no OPML export before this time
+CLEANUP_ALERT_FILE = STATE_DIR / "cleanup_failing.txt"  # set once we have warned
 YT_CLIENT_FILE = STATE_DIR / "youtube_client.json"  # OAuth client from Google Cloud
 YT_TOKEN_FILE = STATE_DIR / "youtube_token.json"  # refresh token, written by --auth-youtube
 LOCAL_DIR = HERE / "out"  # used only with --dry-run
@@ -94,6 +96,10 @@ os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH"
 
 class AuthExpired(Exception):
     """Overcast or YouTube needs the credentials to be set up again."""
+
+
+class OvercastWait(Exception):
+    """Too early to ask Overcast again: on schedule, or after a rate limit."""
 
 
 def log(msg):
@@ -197,8 +203,27 @@ def overcast_login():
     raise AuthExpired(f"Overcast rejected the login (HTTP {status})")
 
 
+# Overcast exports the whole account at once and allows roughly 10 exports a
+# day. Cleaning the YouTube playlist is not urgent, so twice a day is plenty.
+OPML_EVERY_HOURS = 12
+OPML_PAUSE_HOURS = 24  # after a 429, ask once a day until Overcast answers again
+SLACK = 15 * 60  # a sync starts a few seconds late; don't let that skip a turn
+
+
+def opml_wait(hours):
+    OPML_NEXT_FILE.write_text(str(time.time() + hours * 3600 - SLACK))
+
+
 def overcast_opml():
-    """Fetch the extended OPML export. Overcast allows roughly 10 per day."""
+    """Fetch the extended OPML export, at most every OPML_EVERY_HOURS.
+
+    A 429 pushes the next try OPML_PAUSE_HOURS away: asking again while
+    Overcast is still counting only keeps the limit in place.
+    """
+    next_try = float(OPML_NEXT_FILE.read_text()) if OPML_NEXT_FILE.exists() else 0
+    if time.time() < next_try:
+        raise OvercastWait("next look at Overcast after "
+                           + time.strftime("%d.%m %H:%M", time.localtime(next_try)))
     cookie = COOKIE_FILE.read_text().strip() if COOKIE_FILE.exists() else ""
     for attempt in (1, 2):
         if not cookie:
@@ -206,9 +231,12 @@ def overcast_opml():
         status, _, body = fetch("https://overcast.fm/account/export_opml/extended",
                                 headers={"Cookie": f"o={cookie}"}, follow=False)
         if status == 200 and body.lstrip().startswith(b"<?xml"):
+            opml_wait(OPML_EVERY_HOURS)
             return body
         if status == 429:
-            raise AuthExpired("Overcast rate-limited the OPML export (HTTP 429)")
+            opml_wait(OPML_PAUSE_HOURS)
+            raise OvercastWait(f"Overcast rate-limited the OPML export (HTTP 429); "
+                               f"next try in {OPML_PAUSE_HOURS} hours")
         if attempt == 1:
             cookie = ""  # session died, or we were handed the login page
             continue
@@ -221,7 +249,7 @@ def overcast_finished():
     feeds = root.findall(".//outline[@type='rss']")
     ours = [f for f in feeds if f.get("xmlUrl") == FEED_URL]
     if not ours:  # Overcast may have stored a slightly different feed URL
-        marker = f"/{REPO}/releases/download/{TAG}/"
+        marker = asset_url("").split("://", 1)[-1]
         ours = [f for f in feeds
                 if any(marker in (e.get("enclosureUrl") or "")
                        for e in f.findall("./outline[@type='podcast-episode']"))]
@@ -733,14 +761,22 @@ def main():
     known = {e["id"] for e in episodes}
 
     # A failing cleanup must never block the downloads.
+    # Waiting for Overcast is normal, so it only goes to the log. A real failure
+    # warns once, not on every run, until a cleanup works again.
     removed = set()
     try:
         removed = clean_playlist()
-    except AuthExpired as e:
-        log(f"playlist cleanup failed: {e}")
-        notify("Playlist cleanup is failing. See state/sync.log")
+        CLEANUP_ALERT_FILE.unlink(missing_ok=True)
+    except OvercastWait as e:
+        log(f"playlist cleanup: {e}")
     except Exception as e:  # noqa: BLE001 - the feed matters more than the cleanup
-        log(f"playlist cleanup crashed: {type(e).__name__}: {e}")
+        if isinstance(e, AuthExpired):
+            log(f"playlist cleanup failed: {e}")
+        else:
+            log(f"playlist cleanup crashed: {type(e).__name__}: {e}")
+        if not CLEANUP_ALERT_FILE.exists():
+            CLEANUP_ALERT_FILE.write_text(time.strftime("%Y-%m-%d %H:%M:%S"))
+            notify("Cannot clean the YouTube playlist. See state/sync.log")
 
     wanted = [v for v in playlist_ids() if v not in removed]
     log(f"playlist: {len(wanted)} videos, feed: {len(episodes)} episodes")

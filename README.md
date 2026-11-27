@@ -126,7 +126,9 @@ When something looks wrong, `--check` first, then `state/sync.log`.
 1. Asks Overcast which episodes are finished and drops those videos from the
    YouTube playlist. Finished means the OPML export says `played="1"` or
    `userDeleted="1"`. Partial progress does not count, so a half-listened
-   episode stays put.
+   episode stays put. Overcast exports the whole account at once and allows
+   about 10 exports a day, so this step runs at most every 12 hours. If
+   Overcast still answers "too many requests", it waits a day.
 2. Reads the playlist.
 3. Downloads the audio of anything new and re-encodes it. If YouTube asks to
    confirm age, the script signs in and retries that one video.
@@ -136,7 +138,7 @@ When something looks wrong, `--check` first, then `state/sync.log`.
 6. Rebuilds `feed.xml` next to them.
 
 If the cleanup half breaks, downloads carry on. It gets logged, you get one
-notification, and the feed updates as usual.
+notification until a cleanup works again, and the feed updates as usual.
 
 ## Where the files live
 

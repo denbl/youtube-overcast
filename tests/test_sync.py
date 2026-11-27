@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT))
 import sync
 
 ORIGINAL_MISSING = sync.missing_setup
+ORIGINAL_OPML = sync.overcast_opml
 sync.CLEANED_FILE = SCRATCH / "cleaned.json"
 sync.CLEANED_FILE.unlink(missing_ok=True)
 ok = fail = 0
@@ -19,7 +20,7 @@ def check(name, got, want):
     else:
         fail += 1; print(f"  FAIL {name}\n       got  {got!r}\n       want {want!r}")
 
-OURS = f"https://github.com/{sync.REPO}/releases/download/{sync.TAG}"  # whatever config says
+OURS = sync.asset_url("").rstrip("/")  # whatever config says
 
 def opml(xml_url, eps, base=OURS):
     rows = "".join(
@@ -122,6 +123,42 @@ try:
     sync.yt_delete("t", "x"); check("403 raises", "no raise", "AuthExpired")
 except sync.AuthExpired:
     check("403 raises", "AuthExpired", "AuthExpired")
+
+print("OPML export schedule")
+import time
+sync.OPML_NEXT_FILE = SCRATCH / "overcast_next.txt"
+sync.COOKIE_FILE = SCRATCH / "overcast_cookie.txt"
+sync.COOKIE_FILE.write_text("cookie")
+calls = []
+def answer(status, body=b""):
+    def f(*a, **kw):
+        calls.append(a[0]); return status, {}, body
+    return f
+def hours_left():
+    return round((float(sync.OPML_NEXT_FILE.read_text()) - time.time()) / 3600)
+def waits():
+    try:
+        ORIGINAL_OPML(); return False
+    except sync.OvercastWait:
+        return True
+
+XML = b'<?xml version="1.0"?><opml/>'
+sync.fetch = answer(200, XML)
+check("first look returns the export", ORIGINAL_OPML(), XML)
+check("next look in about 12 hours", hours_left(), 12)
+check("a run 4 hours later waits", waits(), True)
+check("and sends no request", len(calls), 1)
+sync.OPML_NEXT_FILE.write_text(str(time.time() - 1))  # 12 hours passed
+check("looks again once the time is up", ORIGINAL_OPML(), XML)
+
+calls.clear()
+sync.OPML_NEXT_FILE.write_text("0")
+sync.fetch = answer(429)
+check("429 means wait", waits(), True)
+check("429 is not a credentials problem", issubclass(sync.OvercastWait, sync.AuthExpired), False)
+check("after a 429 the wait is a day", hours_left(), 24)
+check("the next run waits", waits(), True)
+check("one request in all", len(calls), 1)
 
 print(f"\n{ok} ok, {fail} failed")
 sys.exit(1 if fail else 0)
