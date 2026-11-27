@@ -1,8 +1,13 @@
 {
   "playlist_url": "https://www.youtube.com/playlist?list=PLxxxxxxxxxxxxxxxxxxxx",
+  "feed_title": "My Feed",
+  "storage": "github",
   "github_repo": "yourname/your-feed-repo",
   "release_tag": "audio",
-  "feed_title": "My Feed",
+  "s3_endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+  "s3_bucket": "my-feed",
+  "s3_prefix": "",
+  "public_base_url": "https://pub-xxxxxxxx.r2.dev",
   "cookies_file": "state/cookies.txt",
   "chrome_profile": "state/chrome-profile"
 }

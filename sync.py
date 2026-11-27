@@ -63,12 +63,25 @@ VENV_YT_DLP = HERE / ".venv" / "bin" / "yt-dlp"
 YT_DLP = str(VENV_YT_DLP) if VENV_YT_DLP.exists() else "yt-dlp"
 
 KEYCHAIN_SERVICE = "yt-overcast-overcast"  # holds the Overcast e-mail and password
+S3_KEYCHAIN = "yt-overcast-s3"  # holds the access key id and secret
+
+# Where the audio and feed live. "github" puts them in a release, which is
+# public to anyone who finds the repo; "s3" puts them in any S3-compatible
+# bucket (Cloudflare R2, Backblaze B2, AWS) behind an unguessable URL.
+STORAGE = CONFIG.get("storage", "github")
+S3_ENDPOINT = CONFIG.get("s3_endpoint", "")
+S3_BUCKET = CONFIG.get("s3_bucket", "")
+S3_PREFIX = CONFIG.get("s3_prefix", "")
+PUBLIC_BASE = CONFIG.get("public_base_url", "").rstrip("/")
+CONTENT_TYPES = {".m4a": "audio/mp4", ".xml": "application/rss+xml",
+                 ".jpg": "image/jpeg", ".png": "image/png", ".svg": "image/svg+xml"}
 YT_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
 UA = "yt-overcast-feed/1.0"
 
 DRY_RUN = "--dry-run" in sys.argv
 REBUILD = "--rebuild" in sys.argv  # re-upload cover.jpg and feed.xml even if nothing changed
 AUTH_YOUTUBE = "--auth-youtube" in sys.argv
+MIGRATE = "--migrate" in sys.argv  # copy everything from the GitHub release into the bucket
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")
 
 
@@ -88,8 +101,36 @@ def notify(msg):
     subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "YouTube → Overcast"'])
 
 
-def asset_url(name):
+def github_url(name):
     return f"https://github.com/{REPO}/releases/download/{TAG}/{name}"
+
+
+def asset_url(name):
+    if STORAGE == "s3":
+        return f"{PUBLIC_BASE}/{S3_PREFIX}{name}"
+    return github_url(name)
+
+
+_bucket = None
+
+
+def bucket():
+    """The S3-compatible bucket from config.json, with keys from the keychain."""
+    global _bucket
+    if _bucket is None:
+        import s3store
+        for name, value in (("s3_endpoint", S3_ENDPOINT), ("s3_bucket", S3_BUCKET),
+                            ("public_base_url", PUBLIC_BASE)):
+            if not value:
+                raise AuthExpired(f"storage is \"s3\" but {name} is empty in config.json")
+        _bucket = s3store.Bucket(S3_ENDPOINT, S3_BUCKET,
+                                 keychain("account", S3_KEYCHAIN),
+                                 keychain("password", S3_KEYCHAIN))
+    return _bucket
+
+
+def content_type(name):
+    return CONTENT_TYPES.get(Path(name).suffix.lower(), "application/octet-stream")
 
 
 FEED_URL = asset_url("feed.xml")
@@ -116,15 +157,16 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 # --- Overcast: which episodes are finished -----------------------------------
 
-def keychain(field):
-    """Read the Overcast e-mail or password from the login keychain."""
+def keychain(field, service=None):
+    """Read the account name or password of a login keychain item."""
+    service = service or KEYCHAIN_SERVICE
     if field == "password":
-        return run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"]).strip()
-    p = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE],
+        return run(["security", "find-generic-password", "-s", service, "-w"]).strip()
+    p = subprocess.run(["security", "find-generic-password", "-s", service],
                        text=True, capture_output=True)
     m = re.search(r'"acct"<blob>="([^"]*)"', p.stdout)
     if not m:
-        raise AuthExpired(f"no keychain item for service {KEYCHAIN_SERVICE}")
+        raise AuthExpired(f"no keychain item for service {service}")
     return m.group(1)
 
 
@@ -414,6 +456,10 @@ def upload(path):
         LOCAL_DIR.mkdir(exist_ok=True)
         Path(path).replace(LOCAL_DIR / Path(path).name)
         return
+    if STORAGE == "s3":
+        name = Path(path).name
+        bucket().put(S3_PREFIX + name, Path(path), content_type(name))
+        return
     run(["gh", "release", "upload", TAG, str(path), "--clobber", "--repo", REPO])
 
 
@@ -427,6 +473,12 @@ def upload_copy(path):
 def delete_asset(name):
     if DRY_RUN:
         (LOCAL_DIR / name).unlink(missing_ok=True)
+        return
+    if STORAGE == "s3":
+        try:
+            bucket().delete(S3_PREFIX + name)
+        except RuntimeError as e:
+            log(f"could not delete {name}: {e}")
         return
     subprocess.run(["gh", "release", "delete-asset", TAG, name, "--yes", "--repo", REPO],
                    capture_output=True, text=True)
@@ -463,11 +515,38 @@ def build_feed(episodes):
 """
 
 
+def migrate():
+    """Copy the cover and every episode from the GitHub release into the bucket."""
+    if STORAGE != "s3":
+        raise AuthExpired('set "storage": "s3" in config.json before migrating')
+    episodes = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else []
+    names = [COVER] + [e["file"] for e in episodes]
+    moved = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in names:
+            status, _, body = fetch(github_url(name))
+            if status != 200 or not body:
+                log(f"skipped {name}: GitHub answered HTTP {status}")
+                continue
+            local = Path(tmp) / name
+            local.write_bytes(body)
+            bucket().put(S3_PREFIX + name, local, content_type(name))
+            log(f"moved {name} ({len(body) // 1_000_000} MB)")
+            moved += 1
+    feed = Path(tempfile.gettempdir()) / "feed.xml"
+    feed.write_text(build_feed(episodes))
+    upload(feed)
+    log(f"moved {moved} files; the feed now points at {PUBLIC_BASE}")
+    return 0
+
+
 def main():
     STATE_DIR.mkdir(exist_ok=True)
     if AUTH_YOUTUBE:
         yt_auth()
         return 0
+    if MIGRATE:
+        return migrate()
 
     episodes = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else []
     known = {e["id"] for e in episodes}

@@ -151,6 +151,45 @@ and `Requested format is not available`. So the two live together in a
 virtualenv at a combination known to work, and `sync.py` prefers
 `.venv/bin/yt-dlp` when it finds it.
 
+## Where the files live
+
+By default the audio and `feed.xml` go into a GitHub release, which needs
+nothing but an authenticated `gh`. The catch is that release assets of a public
+repo are public, and the repo shows up on your profile.
+
+The alternative is any S3-compatible bucket. Cloudflare R2 is the one I use:
+10 GB free, no charge for traffic out, and a public address of the form
+`https://pub-<random>.r2.dev` that nobody can guess or stumble onto. Backblaze
+B2 and AWS S3 speak the same protocol and work with the same code.
+
+Put the keys in the login keychain, with the access key id as the account name:
+
+```bash
+security add-generic-password -s yt-overcast-s3 -a YOUR_ACCESS_KEY_ID -A -w
+```
+
+Then set in `config.json`:
+
+```json
+"storage": "s3",
+"s3_endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+"s3_bucket": "your-bucket",
+"s3_prefix": "",
+"public_base_url": "https://pub-xxxxxxxx.r2.dev"
+```
+
+Already running on GitHub? `python3 sync.py --migrate` copies the cover and
+every episode across and rebuilds the feed against the new address. Your player
+sees a different feed URL, so you resubscribe once and anything half-listened
+starts over. After that, delete the old release so the files stop being public:
+
+```bash
+gh release delete <tag> --cleanup-tag --repo <owner>/<repo> --yes
+```
+
+Signing is plain AWS Signature Version 4 written against the standard library,
+checked against botocore's output on seven kinds of request.
+
 ## Commands
 
 ```bash
@@ -158,6 +197,7 @@ python3 sync.py                 # one normal run
 python3 sync.py --dry-run       # build into ./out, report planned deletions, touch nothing
 python3 sync.py --rebuild       # re-upload the cover and feed.xml
 python3 sync.py --auth-youtube  # grant write access to the playlist, once
+python3 sync.py --migrate       # copy everything from the GitHub release into the bucket
 launchctl kickstart gui/$(id -u)/yt-overcast   # run the agent now
 ```
 
@@ -174,7 +214,9 @@ launchctl kickstart gui/$(id -u)/yt-overcast   # run the agent now
 
 Release assets of a public repo are public. Anyone with the URL, or anyone
 browsing the owner's profile, can download the episodes. A private repo is not
-an option, because the player has to fetch the feed without credentials.
+an option, because the player has to fetch the feed without credentials. Moving
+to a bucket, as described above, takes care of the browsing half: the address
+stays unguessable and nothing links to it.
 
 It also means you are re-hosting someone else's YouTube audio at a public URL.
 YouTube's terms do not allow that, and a rights holder could file a DMCA notice
