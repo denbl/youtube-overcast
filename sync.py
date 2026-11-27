@@ -118,6 +118,10 @@ def bucket():
     """The S3-compatible bucket from config.json, with keys from the keychain."""
     global _bucket
     if _bucket is None:
+        # launchd runs this with python -I, which keeps the script's own
+        # directory off sys.path, so s3store has to be found deliberately.
+        if str(HERE) not in sys.path:
+            sys.path.insert(0, str(HERE))
         import s3store
         for name, value in (("s3_endpoint", S3_ENDPOINT), ("s3_bucket", S3_BUCKET),
                             ("public_base_url", PUBLIC_BASE)):
