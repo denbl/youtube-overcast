@@ -44,7 +44,7 @@ YT_TOKEN_FILE = STATE_DIR / "youtube_token.json"  # refresh token, written by --
 LOCAL_DIR = HERE / "out"  # used only with --dry-run
 
 PLAYLIST = CONFIG["playlist_url"]
-REPO = CONFIG["github_repo"]  # "owner/name"
+REPO = CONFIG.get("github_repo", "")  # "owner/name", only used when storage is "github"
 TAG = CONFIG.get("release_tag", "audio")
 FEED_TITLE = CONFIG.get("feed_title", "YouTube на пробежку")
 COVER = "cover.jpg"  # uploaded once with: python3 sync.py --rebuild
@@ -82,6 +82,7 @@ DRY_RUN = "--dry-run" in sys.argv
 REBUILD = "--rebuild" in sys.argv  # re-upload cover.jpg and feed.xml even if nothing changed
 AUTH_YOUTUBE = "--auth-youtube" in sys.argv
 MIGRATE = "--migrate" in sys.argv  # copy everything from the GitHub release into the bucket
+CHECK = "--check" in sys.argv  # report what is set up and what is still missing
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")
 
 
@@ -464,6 +465,8 @@ def upload(path):
         name = Path(path).name
         bucket().put(S3_PREFIX + name, Path(path), content_type(name))
         return
+    if not REPO:
+        raise AuthExpired('storage is "github" but github_repo is empty in config.json')
     run(["gh", "release", "upload", TAG, str(path), "--clobber", "--repo", REPO])
 
 
@@ -544,11 +547,161 @@ def migrate():
     return 0
 
 
+def check():
+    """Report what is set up and what is not, with the fix for each gap."""
+    results = []
+    section = [""]
+
+    def test(name, fn, fix="", optional=False):
+        try:
+            results.append((True, section[0], name, str(fn() or "ok"), "", optional))
+        except Exception as e:
+            results.append((False, section[0], name, why(e), fix, optional))
+
+    def tool(binary, *args):
+        return run([binary, *args]).strip().splitlines()[0][:58]
+
+    section[0] = "Tools"
+    test("yt-dlp", lambda: f"{tool(YT_DLP, '--version')}  ({'.venv' if YT_DLP != 'yt-dlp' else 'PATH'})",
+         "python3 -m venv .venv && .venv/bin/pip install yt-dlp yt-dlp-ejs")
+    test("yt-dlp-ejs", lambda: "installed" if list((HERE / ".venv").rglob("yt_dlp_ejs"))
+         else fail("missing, so a signed-in download cannot solve YouTube's JS challenge"),
+         ".venv/bin/pip install yt-dlp-ejs")
+    test("ffmpeg", lambda: tool("ffmpeg", "-version"), "brew install ffmpeg")
+    test("deno", lambda: tool("deno", "--version"), "brew install deno")
+    if STORAGE == "github":
+        test("gh", lambda: tool("gh", "auth", "status"), "brew install gh && gh auth login")
+
+    section[0] = "Config"
+    test("playlist", lambda: real(playlist_id(), "playlist_url"),
+         'put your own playlist URL in "playlist_url"')
+    test("storage", lambda: STORAGE if STORAGE in ("github", "s3")
+         else fail(f'unknown storage "{STORAGE}"'), 'set "storage" to "github" or "s3"')
+    if STORAGE == "github":
+        test("github_repo", lambda: real(REPO, "github_repo"),
+             'set "github_repo" to your own owner/name')
+        test("release reachable", lambda: str(len(json.loads(run(
+            ["gh", "release", "view", TAG, "--repo", REPO, "--json", "assets"]))["assets"]))
+            + " files", f"gh release create {TAG} --repo {REPO} --notes ''")
+    else:
+        test("bucket settings", lambda: real(S3_BUCKET, "s3_bucket")
+             and real(S3_ENDPOINT, "s3_endpoint") and real(PUBLIC_BASE, "public_base_url"),
+             "fill the s3_* keys in config.json with your own bucket")
+
+    section[0] = "Credentials"
+    test("Overcast password", lambda: mask(keychain("account")),
+         f"security add-generic-password -s {KEYCHAIN_SERVICE} -a YOUR_EMAIL -A -w")
+    test("YouTube access", lambda: f"token refreshes ({len(youtube_ready())} chars)",
+         "save the OAuth client as state/youtube_client.json, then run: python3 sync.py --auth-youtube")
+    if STORAGE == "s3":
+        test("bucket keys", lambda: mask(keychain("account", S3_KEYCHAIN)),
+             f"security add-generic-password -s {S3_KEYCHAIN} -a YOUR_ACCESS_KEY_ID -A -w")
+        test("bucket reachable", lambda: f"{len(bucket().list())} objects")
+        test("feed served publicly", lambda: http_head(FEED_URL),
+             "run: python3 sync.py --rebuild")
+    test("age-gate sign-in", lambda: "Chrome profile ready" if CHROME_PROFILE
+         and under(CHROME_PROFILE).exists() else fail("no Chrome profile, age-restricted videos will fail"),
+         'open -na "Google Chrome" --args '
+         f'--user-data-dir=$PWD/{CHROME_PROFILE or "state/chrome-profile"} https://www.youtube.com',
+         optional=True)
+
+    section[0] = "Runtime"
+    test("state directory", lambda: "writable" if os.access(STATE_DIR, os.W_OK)
+         else fail("not writable"))
+    test("scheduled agent", agent_status,
+         'sed "s|__DIR__|$PWD|g" yt-overcast.plist.example > ~/Library/LaunchAgents/yt-overcast.plist'
+         " && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/yt-overcast.plist",
+         optional=True)
+
+    shown = ""
+    for ok, group, name, detail, _fix, optional in results:
+        if group != shown:
+            print(f"\n{group}")
+            shown = group
+        mark = " ok " if ok else ("    " if optional else "MISS")
+        print(f"  {mark}  {name:<22} {detail}")
+
+    gaps = [(n, f) for ok, _g, n, _d, f, _o in results if not ok and f]
+    if gaps:
+        print("\nTo fix")
+        for name, fix in gaps:
+            print(f"  {name}:\n    {fix}")
+    missing = [n for ok, _g, n, _d, _f, opt in results if not ok and not opt]
+    print(f"\n{len(results) - len(missing)} of {len(results)} ready"
+          + (f". Still needed: {', '.join(missing)}" if missing else ". Everything is set up."))
+    if not missing:
+        print(f"\nAdd this to your podcast app as a custom feed:\n  {FEED_URL}")
+    return 1 if missing else 0
+
+
+def fail(message):
+    raise RuntimeError(message)
+
+
+def why(error):
+    """One readable line out of whatever a check raised."""
+    if isinstance(error, subprocess.CalledProcessError):
+        text = (error.stderr or error.stdout or "").strip().splitlines()
+        return (text[-1] if text else f"{error.cmd[0]} failed")[:80]
+    if isinstance(error, FileNotFoundError):
+        return f"{error.filename or 'command'} not found"
+    return (str(error) or type(error).__name__)[:80]
+
+
+def mask(value):
+    """Shorten an identifier so the check output can be pasted anywhere."""
+    if "@" in value:
+        name, _, domain = value.partition("@")
+        return f"{name[:1]}***@{domain}"
+    return f"{value[:6]}...{value[-4:]}" if len(value) > 14 else value
+
+
+def http_head(url):
+    request = urllib.request.Request(url, method="HEAD")
+    request.add_header("User-Agent", UA)
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return f"HTTP {response.status}, {response.headers.get('Content-Type')}"
+
+
+def agent_status():
+    """An agent counts only if it runs this copy of sync.py, not another one."""
+    mine = str(HERE / "sync.py")
+    agents = Path.home() / "Library" / "LaunchAgents"
+    labels = [f.stem for f in agents.glob("*.plist")
+              if mine in f.read_text(errors="replace")] if agents.exists() else []
+    if not labels:
+        return fail(f"no launchd agent runs {mine}")
+    listed = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
+    for label in labels:
+        if any(line.endswith(label) for line in listed.splitlines()):
+            return f"{label}, loaded"
+    return fail(f"{labels[0]} is installed but not loaded")
+
+
+def real(value, key):
+    """Reject the untouched values from config.json.example."""
+    if not value:
+        fail(f"{key} is empty")
+    if any(m in str(value).lower() for m in ("xxxx", "yourname", "your-", "<", "example.com")):
+        fail(f"{key} is still the example value")
+    return value
+
+
+def youtube_ready():
+    if not YT_CLIENT_FILE.exists():
+        fail(f"no {YT_CLIENT_FILE.name}, download the OAuth client from Google Cloud")
+    if not YT_TOKEN_FILE.exists():
+        fail(f"no {YT_TOKEN_FILE.name}, access was never granted")
+    return yt_token()
+
+
 def main():
     STATE_DIR.mkdir(exist_ok=True)
     if AUTH_YOUTUBE:
         yt_auth()
         return 0
+    if CHECK:
+        return check()
     if MIGRATE:
         return migrate()
 
